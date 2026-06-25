@@ -61,13 +61,22 @@ If YouTube or another site returns a bot-check, login challenge, or rate-limit e
 - `ffmpeg`
 - `ffprobe`
 
-BatchClip checks common Homebrew and system executable locations, including `/opt/homebrew/bin`, `/usr/local/bin`, and the process `PATH`.
+BatchClip checks common Homebrew and system executable locations, including `/opt/homebrew/bin`, `/usr/local/bin`, and the process `PATH`. If a required tool is missing, the app shows the shortest Terminal setup commands for that Mac and offers a copy button.
 
-If you do not already have them, install [Homebrew](https://brew.sh/) first, then run:
+If Homebrew is already installed, run:
 
 ```bash
 brew install yt-dlp ffmpeg
 ```
+
+If Homebrew is not installed, run the official installer first:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+brew install yt-dlp ffmpeg
+```
+
+`ffprobe` is included with `ffmpeg`. If Homebrew prints PATH setup instructions after installation, follow those before reopening BatchClip.
 
 ## Build And Run
 

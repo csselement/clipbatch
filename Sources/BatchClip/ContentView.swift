@@ -106,6 +106,10 @@ private struct EntryPanel: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            if store.hasMissingDependencies {
+                DependencySetupView(store: store)
+            }
+
             Button {
                 store.addLinks(kind: linkKind)
             } label: {
@@ -158,6 +162,48 @@ private struct EntryPanel: View {
             }
         }
         .padding(20)
+    }
+}
+
+private struct DependencySetupView: View {
+    let store: DownloaderStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "wrench.and.screwdriver")
+                    .foregroundStyle(.orange)
+                    .frame(width: 18)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(store.dependencySetupMessage)
+                        .font(.caption)
+                        .foregroundStyle(.primary)
+
+                    ScrollView(.horizontal, showsIndicators: true) {
+                        Text(store.dependencySetupCommands)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                }
+            }
+
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(store.dependencySetupCommands, forType: .string)
+                store.globalMessage = "Setup commands copied"
+            } label: {
+                Label("Copy Setup Commands", systemImage: "doc.on.doc")
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+        }
     }
 }
 

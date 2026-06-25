@@ -36,6 +36,10 @@ final class DownloaderStore {
         ToolLocator.executablePath(named: "ffprobe")
     }
 
+    private var brewPath: String {
+        ToolLocator.executablePath(named: "brew")
+    }
+
     var unfinishedCount: Int {
         items.filter { !$0.status.isFinished }.count
     }
@@ -65,6 +69,30 @@ final class DownloaderStore {
         let ffmpeg = FileManager.default.isExecutableFile(atPath: ffmpegPath) ? "ffmpeg ready" : "ffmpeg missing"
         let ffprobe = FileManager.default.isExecutableFile(atPath: ffprobePath) ? "ffprobe ready" : "ffprobe missing"
         return "\(ytdlp) · \(ffmpeg) · \(ffprobe)"
+    }
+
+    var missingDependencyNames: [String] {
+        [
+            ("yt-dlp", ytDLPPath),
+            ("ffmpeg", ffmpegPath),
+            ("ffprobe", ffprobePath)
+        ].compactMap { name, path in
+            FileManager.default.isExecutableFile(atPath: path) ? nil : name
+        }
+    }
+
+    var hasMissingDependencies: Bool {
+        !missingDependencyNames.isEmpty
+    }
+
+    var dependencySetupMessage: String {
+        "Missing: \(missingDependencyNames.joined(separator: ", ")). Open Terminal and run:"
+    }
+
+    var dependencySetupCommands: String {
+        DependencyInstaller.commands(
+            hasHomebrew: FileManager.default.isExecutableFile(atPath: brewPath)
+        )
     }
 
     var rateLimitWarning: String? {
@@ -197,17 +225,17 @@ final class DownloaderStore {
         guard !isRunning else { return }
 
         guard FileManager.default.isExecutableFile(atPath: ytDLPPath) else {
-            globalMessage = "Install yt-dlp with Homebrew or add it to PATH"
+            showMissingDependencyInstructions()
             return
         }
 
         guard FileManager.default.isExecutableFile(atPath: ffmpegPath) else {
-            globalMessage = "Install ffmpeg with Homebrew or add it to PATH"
+            showMissingDependencyInstructions()
             return
         }
 
         guard FileManager.default.isExecutableFile(atPath: ffprobePath) else {
-            globalMessage = "Install ffprobe with Homebrew or add it to PATH"
+            showMissingDependencyInstructions()
             return
         }
 
@@ -350,6 +378,14 @@ final class DownloaderStore {
 
         UNUserNotificationCenter.current().add(request)
     }
+
+    private func showMissingDependencyInstructions() {
+        globalMessage = "Install required tools"
+        downloadAlert = DownloadAlert(
+            title: "Install Required Tools",
+            message: "\(dependencySetupMessage)\n\n\(dependencySetupCommands)\n\nffprobe is included with ffmpeg. Follow any Homebrew next-step PATH instructions, then reopen BatchClip."
+        )
+    }
 }
 
 actor DownloadRunner {
@@ -470,6 +506,22 @@ struct ToolLocator {
         }
 
         return result
+    }
+}
+
+struct DependencyInstaller {
+    static let installHomebrewCommand = #"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#
+    static let installToolsCommand = "brew install yt-dlp ffmpeg"
+
+    static func commands(hasHomebrew: Bool) -> String {
+        if hasHomebrew {
+            return installToolsCommand
+        }
+
+        return """
+        \(installHomebrewCommand)
+        \(installToolsCommand)
+        """
     }
 }
 
