@@ -5,6 +5,7 @@ VERSION="${1:-0.1.0}"
 APP_NAME="BatchClip"
 BUNDLE_ID="com.csselement.BatchClip"
 MIN_SYSTEM_VERSION="14.0"
+ARCH="$(uname -m)"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
@@ -16,7 +17,7 @@ APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 APP_ICON="$ROOT_DIR/AppResources/AppIcon.icns"
-ZIP_PATH="$DIST_DIR/$APP_NAME-$VERSION-macos-arm64.zip"
+ZIP_PATH="$DIST_DIR/$APP_NAME-$VERSION-macos-$ARCH.zip"
 
 cd "$ROOT_DIR"
 

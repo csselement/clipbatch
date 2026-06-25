@@ -20,18 +20,40 @@ final class DownloaderStore {
     var isRateLimitEnabled = true
     var downloadAlert: DownloadAlert?
 
-    private let ytDLPPath = "/opt/homebrew/bin/yt-dlp"
-    private let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
     private let runner = DownloadRunner()
     private var activeBatchTask: Task<Void, Never>?
     private var isCancellationRequested = false
 
+    private var ytDLPPath: String {
+        ToolLocator.executablePath(named: "yt-dlp")
+    }
+
+    private var ffmpegPath: String {
+        ToolLocator.executablePath(named: "ffmpeg")
+    }
+
+    private var ffprobePath: String {
+        ToolLocator.executablePath(named: "ffprobe")
+    }
+
+    var unfinishedCount: Int {
+        items.filter { !$0.status.isFinished }.count
+    }
+
+    var hasFailedItems: Bool {
+        items.contains { $0.status.isFailed }
+    }
+
+    var hasFinishedItems: Bool {
+        items.contains { $0.status.isFinished }
+    }
+
     var canStart: Bool {
-        !isRunning && !items.filter { $0.status != .finished }.isEmpty
+        !isRunning && unfinishedCount > 0
     }
 
     var canDisableRateLimit: Bool {
-        items.filter { $0.status != .finished }.count < Self.moderateBatchWarningCount
+        unfinishedCount < Self.moderateBatchWarningCount
     }
 
     var rateLimitControlMessage: String {
@@ -41,12 +63,13 @@ final class DownloaderStore {
     var dependencySummary: String {
         let ytdlp = FileManager.default.isExecutableFile(atPath: ytDLPPath) ? "yt-dlp ready" : "yt-dlp missing"
         let ffmpeg = FileManager.default.isExecutableFile(atPath: ffmpegPath) ? "ffmpeg ready" : "ffmpeg missing"
-        return "\(ytdlp) · \(ffmpeg)"
+        let ffprobe = FileManager.default.isExecutableFile(atPath: ffprobePath) ? "ffprobe ready" : "ffprobe missing"
+        return "\(ytdlp) · \(ffmpeg) · \(ffprobe)"
     }
 
     var rateLimitWarning: String? {
         guard isRateLimitEnabled else { return nil }
-        let remainingCount = items.filter { $0.status != .finished }.count
+        let remainingCount = unfinishedCount
 
         if remainingCount >= Self.highBatchWarningCount {
             return "High rate-limit risk: \(remainingCount) queued links. The app downloads sequentially with cooldowns, but large batches from the same site can still be throttled."
@@ -60,6 +83,8 @@ final class DownloaderStore {
     }
 
     func addLinks(kind: DownloadKind) {
+        guard !isRunning else { return }
+
         let links = pendingText
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -97,7 +122,7 @@ final class DownloaderStore {
 
     func clearFinished() {
         guard !isRunning else { return }
-        items.removeAll { $0.status == .finished }
+        items.removeAll { $0.status.isFinished }
     }
 
     func isStartingNext(_ item: DownloadItem) -> Bool {
@@ -106,22 +131,26 @@ final class DownloaderStore {
             return false
         }
 
-        let firstPending = items.first(where: { $0.status != .finished })
+        let firstPending = items.first(where: { !$0.status.isFinished })
         return firstPending?.id == item.id
     }
 
-    func resetFailedAndQueued() {
+    func retryFailedItems() {
         guard !isRunning else { return }
         for index in items.indices {
             if case .failed = items[index].status {
                 items[index].status = .queued
                 items[index].log = ""
                 items[index].activityText = ""
+                items[index].progressPercent = nil
+                items[index].progressText = ""
             }
         }
     }
 
     func chooseFolder() {
+        guard !isRunning else { return }
+
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
@@ -168,12 +197,17 @@ final class DownloaderStore {
         guard !isRunning else { return }
 
         guard FileManager.default.isExecutableFile(atPath: ytDLPPath) else {
-            globalMessage = "Install yt-dlp at \(ytDLPPath)"
+            globalMessage = "Install yt-dlp with Homebrew or add it to PATH"
             return
         }
 
         guard FileManager.default.isExecutableFile(atPath: ffmpegPath) else {
-            globalMessage = "Install ffmpeg at \(ffmpegPath)"
+            globalMessage = "Install ffmpeg with Homebrew or add it to PATH"
+            return
+        }
+
+        guard FileManager.default.isExecutableFile(atPath: ffprobePath) else {
+            globalMessage = "Install ffprobe with Homebrew or add it to PATH"
             return
         }
 
@@ -208,11 +242,14 @@ final class DownloaderStore {
             }
         }
 
-        let queueIndices = items.indices.filter { items[$0].status != .finished }
+        let queueIndices = items.indices.filter { !items[$0].status.isFinished }
         guard !queueIndices.isEmpty else {
             globalMessage = "Nothing to download"
             return
         }
+
+        var completedCount = 0
+        var failedCount = 0
 
         for (position, index) in queueIndices.enumerated() {
             guard !Task.isCancelled, isRunning, !isCancellationRequested else { return }
@@ -230,13 +267,15 @@ final class DownloaderStore {
                 items[index].progressText = "100%"
                 items[index].activityText = "Complete"
                 items[index].log = output
+                completedCount += 1
             } catch {
                 guard !isCancellationRequested else { return }
                 let failure = downloadFailureDetails(from: error)
-                items[index].status = .failed("Failed")
+                failedCount += 1
+                items[index].status = .failed(failure.rowStatus)
                 items[index].progressPercent = nil
-                items[index].activityText = "Failed"
-                items[index].log += "\n\(failure.message)"
+                items[index].activityText = failure.title
+                items[index].log = items[index].log.appendingFailureMessage(failure.message)
                 globalMessage = failure.stopsBatch ? "Batch stopped" : "Download failed"
 
                 if failure.stopsBatch {
@@ -254,8 +293,12 @@ final class DownloaderStore {
         }
 
         if !isCancellationRequested {
-            globalMessage = "Batch complete"
-            notifyBatchComplete(downloadCount: queueIndices.count)
+            if failedCount > 0 {
+                globalMessage = "Batch finished with \(failedCount) failure\(failedCount == 1 ? "" : "s")"
+            } else {
+                globalMessage = "Batch complete"
+            }
+            notifyBatchComplete(downloadCount: completedCount, failedCount: failedCount)
         }
     }
 
@@ -289,10 +332,14 @@ final class DownloaderStore {
         }
     }
 
-    private func notifyBatchComplete(downloadCount: Int) {
+    private func notifyBatchComplete(downloadCount: Int, failedCount: Int) {
         let content = UNMutableNotificationContent()
         content.title = "BatchClip"
-        content.body = downloadCount == 1 ? "Download complete." : "\(downloadCount) downloads complete."
+        if failedCount > 0 {
+            content.body = "\(downloadCount) complete, \(failedCount) failed."
+        } else {
+            content.body = downloadCount == 1 ? "Download complete." : "\(downloadCount) downloads complete."
+        }
         content.sound = .default
 
         let request = UNNotificationRequest(
@@ -322,7 +369,7 @@ actor DownloadRunner {
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
         process.environment = [
-            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            "PATH": ToolLocator.processSearchPath
         ]
 
         let pipe = Pipe()
@@ -339,7 +386,14 @@ actor DownloadRunner {
             onOutput(chunk)
         }
 
-        try process.run()
+        do {
+            try process.run()
+        } catch {
+            outputHandle.readabilityHandler = nil
+            activeProcess = nil
+            throw error
+        }
+
         process.waitUntilExit()
         outputHandle.readabilityHandler = nil
         activeProcess = nil
@@ -365,6 +419,57 @@ actor OutputCollector {
 
     func append(_ chunk: String) {
         value += chunk
+    }
+}
+
+struct ToolLocator {
+    static let defaultSearchDirectories = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin"
+    ]
+
+    static var processSearchPath: String {
+        defaultSearchDirectories.joined(separator: ":")
+    }
+
+    static func executablePath(
+        named name: String,
+        searchDirectories: [String] = defaultSearchDirectories,
+        environmentPath: String? = ProcessInfo.processInfo.environment["PATH"]
+    ) -> String {
+        let environmentDirectories = (environmentPath ?? "")
+            .split(separator: ":")
+            .map(String.init)
+
+        for directory in orderedUnique(searchDirectories + environmentDirectories) {
+            let candidate = URL(fileURLWithPath: directory)
+                .appendingPathComponent(name)
+                .path
+
+            if FileManager.default.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+
+        return URL(fileURLWithPath: searchDirectories.first ?? "/usr/bin")
+            .appendingPathComponent(name)
+            .path
+    }
+
+    private static func orderedUnique(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+
+        for value in values where !value.isEmpty && !seen.contains(value) {
+            seen.insert(value)
+            result.append(value)
+        }
+
+        return result
     }
 }
 
@@ -403,11 +508,15 @@ private extension DownloaderStore {
 
         switch item.kind {
         case .video:
+            let transcodeCommand = """
+            after_move:/bin/sh -c 'file="$1"; codec="$("\(ffprobePath)" -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1:nk=1 "$file")"; if [ "$codec" = "h264" ]; then exit 0; fi; tmp="${file%.*}.h264.mp4"; "\(ffmpegPath)" -y -i "$file" -map 0:v:0 -map 0:a? -c:v libx264 -preset medium -crf 18 -c:a aac -b:a 192k -movflags +faststart "$tmp" && mv "$tmp" "$file"' sh {}
+            """.trimmingCharacters(in: .whitespacesAndNewlines)
+
             args += [
                 "-f", "bv*[vcodec^=avc1][ext=mp4]+ba[ext=m4a]/b[vcodec^=avc1][ext=mp4]/bv*+ba/b",
                 "-S", "vcodec:h264,ext:mp4:m4a",
                 "--merge-output-format", "mp4",
-                "--exec", "after_move:/bin/sh -c 'file=\"$1\"; codec=\"$(/opt/homebrew/bin/ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1:nk=1 \"$file\")\"; if [ \"$codec\" = \"h264\" ]; then exit 0; fi; tmp=\"${file%.*}.h264.mp4\"; /opt/homebrew/bin/ffmpeg -y -i \"$file\" -map 0:v:0 -map 0:a? -c:v libx264 -preset medium -crf 18 -c:a aac -b:a 192k -movflags +faststart \"$tmp\" && mv \"$tmp\" \"$file\"' sh {}"
+                "--exec", transcodeCommand
             ]
         case .audio:
             args += [
@@ -551,7 +660,12 @@ private extension DownloaderStore {
     }
 
     func downloadFailureDetails(from error: Error) -> DownloadFailureDetails {
-        let message = error.localizedDescription
+        DownloadFailureClassifier.details(from: error.localizedDescription)
+    }
+}
+
+struct DownloadFailureClassifier {
+    static func details(from message: String) -> DownloadFailureDetails {
         let normalized = message.lowercased()
 
         if normalized.contains("sign in to confirm") ||
@@ -563,6 +677,7 @@ private extension DownloaderStore {
             return DownloadFailureDetails(
                 title: "YouTube Bot Check",
                 message: "YouTube is asking to confirm this is not a bot. The batch has been stopped to avoid additional automated requests. Wait before retrying, reduce the batch size, and keep rate-limiting enabled.",
+                rowStatus: "Bot check",
                 stopsBatch: true
             )
         }
@@ -575,13 +690,26 @@ private extension DownloaderStore {
             return DownloadFailureDetails(
                 title: "Rate Limit Detected",
                 message: "The site appears to be rate-limiting requests. The batch has been stopped to avoid additional automated requests. Wait before retrying, reduce the batch size, and keep rate-limiting enabled.",
+                rowStatus: "Rate limited",
                 stopsBatch: true
+            )
+        }
+
+        if normalized.contains("[twitter]") &&
+            (normalized.contains("no video could be found") ||
+                normalized.contains("video #") && normalized.contains("is unavailable")) {
+            return DownloadFailureDetails(
+                title: "No X Video Found",
+                message: "X/Twitter did not expose a downloadable video for this post. The post may be private, removed, restricted, or not publicly serving video media.",
+                rowStatus: "No video found",
+                stopsBatch: false
             )
         }
 
         return DownloadFailureDetails(
             title: "Download Failed",
             message: message,
+            rowStatus: "Failed",
             stopsBatch: false
         )
     }
@@ -596,6 +724,7 @@ struct DownloadAlert: Identifiable, Equatable {
 struct DownloadFailureDetails {
     var title: String
     var message: String
+    var rowStatus: String
     var stopsBatch: Bool
 }
 
@@ -613,5 +742,14 @@ private extension String {
     func trimmedFallback(_ fallback: String) -> String {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? fallback : trimmed
+    }
+
+    func appendingFailureMessage(_ message: String) -> String {
+        let trimmedLog = trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !trimmedMessage.isEmpty else { return self }
+        guard !trimmedLog.isEmpty else { return trimmedMessage }
+        return "\(trimmedLog)\n\n\(trimmedMessage)"
     }
 }

@@ -1,8 +1,18 @@
-# ClipBatch
+# BatchClip
 
-ClipBatch is a minimal native macOS app for batch downloading social media video and audio with `yt-dlp` and `ffmpeg`.
+BatchClip is a minimal native macOS app for batch downloading social media video and audio with `yt-dlp` and `ffmpeg`.
 
-![ClipBatch example UI](docs/images/batchclip-ui.png)
+![BatchClip example UI](docs/images/batchclip-ui.png)
+
+## Download
+
+Download the latest zipped macOS app from [GitHub Releases](https://github.com/csselement/clipbatch/releases/latest).
+
+The release asset is a zipped macOS app. Unzip it, move `BatchClip.app` to Applications if desired, and launch it.
+
+Current binaries are ad-hoc signed but not Apple Developer ID notarized. macOS may show a Gatekeeper warning the first time the app is opened.
+
+## Workflow
 
 The app is designed for a simple workflow:
 
@@ -47,10 +57,11 @@ If YouTube or another site returns a bot-check, login challenge, or rate-limit e
 
 - macOS 14 or newer
 - Swift toolchain for building from source
-- `yt-dlp` installed at `/opt/homebrew/bin/yt-dlp`
-- `ffmpeg` installed at `/opt/homebrew/bin/ffmpeg`
+- `yt-dlp`
+- `ffmpeg`
+- `ffprobe`
 
-The current build assumes Homebrew-style Apple Silicon paths for `yt-dlp` and `ffmpeg`.
+BatchClip checks common Homebrew and system executable locations, including `/opt/homebrew/bin`, `/usr/local/bin`, and the process `PATH`.
 
 If you do not already have them, install [Homebrew](https://brew.sh/) first, then run:
 
@@ -78,22 +89,12 @@ The script stages a native app bundle at:
 dist/BatchClip.app
 ```
 
-## Downloadable Builds
+## Package A Release
 
-Prebuilt binaries are published on the GitHub Releases page when available:
-
-```text
-https://github.com/csselement/clipbatch/releases
-```
-
-The release asset is a zipped macOS app. Unzip it, move `BatchClip.app` to Applications if desired, and launch it.
-
-Current binaries are ad-hoc signed but not Apple Developer ID notarized. macOS may show a Gatekeeper warning the first time the app is opened.
-
-To create a release zip locally:
+To create a release zip locally, pass the version without a leading `v`:
 
 ```bash
-./script/package_release.sh 0.1.0
+./script/package_release.sh 0.1.9
 ```
 
 ## Limitations
@@ -103,5 +104,4 @@ To create a release zip locally:
 - Some sites may require cookies, login, or additional `yt-dlp` options that this MVP does not expose.
 - The app does not provide per-link quality controls.
 - The app shows a running progress indicator and percentage for the active download.
-- Dependency paths are hardcoded to `/opt/homebrew/bin`.
 - Playlist downloading is supported for YouTube URLs that include a `list=` playlist parameter.

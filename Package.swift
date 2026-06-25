@@ -13,6 +13,11 @@ let package = Package(
         .executableTarget(
             name: "BatchClip",
             path: "Sources/BatchClip"
+        ),
+        .testTarget(
+            name: "BatchClipTests",
+            dependencies: ["BatchClip"],
+            path: "Tests/BatchClipTests"
         )
     ]
 )

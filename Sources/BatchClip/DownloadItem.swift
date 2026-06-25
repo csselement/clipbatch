@@ -32,8 +32,20 @@ enum DownloadStatus: Equatable {
         case .queued: "Queued"
         case .running: "Downloading"
         case .finished: "Done"
-        case .failed: "Failed"
+        case .failed(let message): message.isEmpty ? "Failed" : message
         }
+    }
+
+    var isFinished: Bool {
+        self == .finished
+    }
+
+    var isFailed: Bool {
+        if case .failed = self {
+            return true
+        }
+
+        return false
     }
 }
 

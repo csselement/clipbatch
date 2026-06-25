@@ -113,7 +113,7 @@ private struct EntryPanel: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(store.pendingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(store.isRunning || store.pendingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Download Folder")
@@ -129,6 +129,7 @@ private struct EntryPanel: View {
                     Button("Browse") {
                         store.chooseFolder()
                     }
+                    .disabled(store.isRunning)
                 }
                 .padding(10)
                 .utilitySurface(cornerRadius: 8)
@@ -172,18 +173,18 @@ private struct QueuePanel: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
-                    store.resetFailedAndQueued()
+                    store.retryFailedItems()
                 } label: {
                     Label("Retry Failed", systemImage: "arrow.clockwise")
                 }
-                .disabled(store.isRunning)
+                .disabled(store.isRunning || !store.hasFailedItems)
 
                 Button {
                     store.clearFinished()
                 } label: {
                     Label("Clear Done", systemImage: "checkmark.circle")
                 }
-                .disabled(store.isRunning)
+                .disabled(store.isRunning || !store.hasFinishedItems)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
@@ -432,7 +433,6 @@ private struct LinkListEditor: NSViewRepresentable {
         textView.allowsUndo = true
         textView.string = text
         textView.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-        textView.delegate = context.coordinator
 
         textView.onPasteComplete = { [weak textView] pastedText in
             guard
