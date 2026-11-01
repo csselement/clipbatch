@@ -2,8 +2,6 @@
 
 BatchClip is a minimal native macOS app for batch downloading social media video and audio with `yt-dlp` and `ffmpeg`.
 
-![BatchClip example UI](docs/images/batchclip-ui.png)
-
 ## Download
 
 Download the latest zipped macOS app from [GitHub Releases](https://github.com/csselement/clipbatch/releases/latest).
@@ -14,44 +12,38 @@ Current binaries are ad-hoc signed but not Apple Developer ID notarized. macOS m
 
 ## Workflow
 
-The app is designed for a simple workflow:
+1. Paste HTTP/HTTPS links, one per line, or use **Import…** / **Command-O**.
+2. Choose Video or Audio, then an output mode, and **Add to Batch**.
+3. Choose the destination and pacing in the shared footer.
+4. Click **Start Batch** at the bottom right, or press **Command-Return**.
 
-1. Paste one or more links, one per line.
-2. Or use File > Open Text File... to load a prepared `.txt` list.
-3. Choose whether those links should be downloaded as video or audio.
-4. Pick a download folder with Browse.
-5. Start the batch.
+Links are deduplicated within pasted lists and against jobs with the same media type, output mode, and playlist choice. Invalid links remain in the editor for correction. A video and an audio download of the same URL can be queued independently.
 
-## What It Is For
+## Output Modes
 
-This MVP is for quickly downloading media from popular websites supported by `yt-dlp`, especially when collecting multiple links before starting a batch. It prioritizes compatibility and usability over advanced download controls.
+- **Compatible video:** prefers H.264 MP4 sources. Compatible video/audio streams are copied; other video is converted to H.264 using `libx264 -preset veryfast -crf 18`, and incompatible audio to AAC. Final output uses the correct `.mp4` extension.
+- **Compatible audio:** MP3 at 320 kbps.
+- **Original video:** keeps the downloaded codecs and lets yt-dlp choose a suitable container; no additional video re-encoding.
+- **Original audio:** keeps the source audio codec, extracting it with stream copy when the source also contains video. It never silently falls back to lossy conversion.
 
-## Hardcoded Formats
+Conversion writes to a temporary file, validates the result, and only then replaces the downloaded source. Failed or cancelled conversion keeps the source. A conflicting destination file is preserved and reported as an error instead of overwritten.
 
-The download settings are intentionally hardcoded:
+## Pacing and Site Limits
 
-- Video downloads prefer original H.264 MP4 when available.
-- If the final video is not H.264, the app transcodes it to H.264 MP4 with `ffmpeg`.
-- Audio downloads are always extracted as MP3 at 320 kbps.
+**Cautious** is the default. yt-dlp waits 8–18 seconds before downloads and spaces extraction requests by 1.5 seconds. BatchClip does not add a second cooldown between queue entries. **Standard** adds no scheduled waits. Both modes download sequentially, use retry backoff, and stop the batch when a terminal bot-check or rate-limit error is detected. Existing yt-dlp configuration can also affect behavior.
 
-There are no user-facing codec, container, bitrate, or quality settings. This keeps the app straightforward and produces files that are broadly compatible with media players, editors, and sharing workflows.
-
-## Rate-Limit Safeguards
-
-The app downloads batch items sequentially and adds cooldown time between downloads to reduce the chance of platform throttling. It also passes conservative sleep and retry settings to `yt-dlp`.
-
-When a batch contains many queued links, the app shows a rate-limit warning. The cooldown status counts down live between downloads. Rate-limiting can be disabled for short batches, but it is forced on for larger queues.
-
-If YouTube or another site returns a bot-check, login challenge, or rate-limit error, the app stops the batch automatically and shows a modal with remediation steps. These safeguards reduce risk, but they cannot guarantee that YouTube or another platform will not throttle, block, or challenge automated download traffic.
+Large queues and playlist jobs show a reminder to consider Cautious pacing. Pacing remains a user choice; no setting can guarantee that a site will not throttle or challenge downloads. The selected pacing and destination persist between launches.
 
 ## Batch Controls
 
-- Add links manually or import one-link-per-line `.txt` files from the File menu.
-- The link editor moves to a new line after pasted links to speed up list entry.
-- YouTube playlist URLs are supported when the link includes a `list=` playlist parameter.
-- Active downloads show progress percentage and a compact title/thumbnail when that metadata is available from the current download.
-- Stop Batch cancels the active download and prevents the queue from advancing to the next item.
-- File > Stop Batch also cancels an active batch.
+- Playlist downloads require the explicit **Download entire playlists** option; it is off by default.
+- Queue rows show metadata, the current processing stage, and transfer speed/ETA when available. Conversion progress is separate from download progress.
+- **Details** exposes the command log and timings for each stage.
+- **Stop Batch** / **Command-period** cancels the command and its child processes. The queue remains locked while stopping.
+- **Retry Failed** starts failed/cancelled jobs again, leaving unrelated queued jobs for Start Batch. A failed row's contextual menu can retry just that job.
+- Completed rows retain **Show downloaded file in Finder**.
+- **Clear Done** removes completed entries from the queue, not their files.
+- Tool status is available from the footer's wrench button. Missing tools show installation instructions.
 
 ## Requirements
 
@@ -103,14 +95,29 @@ dist/BatchClip.app
 To create a release zip locally, pass the version without a leading `v`:
 
 ```bash
-./script/package_release.sh 0.1.9
+./script/package_release.sh 0.2.0
 ```
+
+## Tests
+
+Run the unit and local process/media tests:
+
+```bash
+swift test
+```
+
+Run the full suite, including end-to-end yt-dlp downloads and conversion of generated clips served only on localhost:
+
+```bash
+python3 script/test_local_pipeline.py
+```
+
+The latter requires Python 3 plus the app's tools. It creates and cleans up its own fixtures and HTTP server. Without that harness, the two HTTP pipeline tests are skipped. Media conversion tests also require ffmpeg.
 
 ## Limitations
 
-- Download behavior depends on `yt-dlp` support for each website.
-- Large batches may still trigger platform rate limits, throttling, login prompts, or temporary blocks.
-- Some sites may require cookies, login, or additional `yt-dlp` options that this MVP does not expose.
-- The app does not provide per-link quality controls.
-- The app shows a running progress indicator and percentage for the active download.
-- Playlist downloading is supported for YouTube URLs that include a `list=` playlist parameter.
+- Site compatibility and network speed depend on yt-dlp and the source site.
+- Some sites need cookies, login, or additional yt-dlp options not exposed in the UI.
+- The app does not expose resolution, bitrate, or codec tuning beyond its output modes.
+- The faster software encoding preset trades compression efficiency for speed; output size and quality vary with footage.
+- Queues are held in memory and are not restored after quitting.

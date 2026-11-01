@@ -53,6 +53,8 @@ struct DownloadItem: Identifiable, Equatable {
     let id = UUID()
     var url: String
     var kind: DownloadKind
+    var outputMode: OutputMode = .compatible
+    var includePlaylist = false
     var status: DownloadStatus = .queued
     var log: String = ""
     var progressPercent: Double? = nil
@@ -60,19 +62,42 @@ struct DownloadItem: Identifiable, Equatable {
     var activityText: String = ""
     var title: String?
     var thumbnailURL: String = ""
+    var downloadedFileURLs: [URL] = []
+    var phase: DownloadPhase = .preparing
+    var phaseStartedAt: Date?
+    var phaseDurations: [DownloadPhase: TimeInterval] = [:]
+
+    var outputDetail: String {
+        outputMode == .original ? "Original \(kind.rawValue.lowercased())" : kind.detail
+    }
+
+    mutating func setPhase(_ newPhase: DownloadPhase, now: Date = Date()) {
+        guard newPhase != phase || phaseStartedAt == nil else { return }
+        finishTiming(now: now)
+        phase = newPhase
+        phaseStartedAt = newPhase == .complete ? nil : now
+        activityText = newPhase.rawValue
+        progressPercent = nil
+        progressText = ""
+    }
+
+    mutating func finishTiming(now: Date = Date()) {
+        if let started = phaseStartedAt {
+            phaseDurations[phase, default: 0] += now.timeIntervalSince(started)
+        }
+        phaseStartedAt = nil
+    }
+
+    var timingSummary: String {
+        phaseDurations.sorted { $0.key.rawValue < $1.key.rawValue }
+            .map { "\($0.key.rawValue): \(String(format: "%.1f", $0.value))s" }
+            .joined(separator: " · ")
+    }
 
     var displayTitle: String {
         let cleaned = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return cleaned.isEmpty ? url : cleaned
     }
 
-    var allowsPlaylist: Bool {
-        guard let components = URLComponents(string: url) else {
-            return false
-        }
-
-        return components.queryItems?.contains {
-            $0.name.lowercased() == "list" && !($0.value ?? "").isEmpty
-        } ?? false
-    }
+    var allowsPlaylist: Bool { includePlaylist }
 }

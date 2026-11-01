@@ -20,11 +20,17 @@ struct BatchClipApp: App {
                 }
                 .keyboardShortcut("o", modifiers: [.command])
 
+                .disabled(store.isRunning)
+
+                Button("Start Batch") { store.startBatch() }
+                    .keyboardShortcut(.return, modifiers: [.command])
+                    .disabled(!store.canStart)
+
                 Button("Stop Batch") {
                     store.cancelBatch()
                 }
                 .keyboardShortcut(".", modifiers: [.command])
-                .disabled(!store.isRunning)
+                .disabled(!store.isRunning || store.isStopping)
             }
         }
     }

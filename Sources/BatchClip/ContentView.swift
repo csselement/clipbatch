@@ -8,13 +8,6 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                HeaderView(store: store)
-                    .padding(.horizontal, 24)
-                    .padding(.top, 20)
-                    .padding(.bottom, 16)
-
-                Divider()
-
                 HSplitView {
                     EntryPanel(store: store, linkKind: $linkKind)
                         .frame(minWidth: 320, idealWidth: 360, maxWidth: 440)
@@ -22,8 +15,9 @@ struct ContentView: View {
                     QueuePanel(store: store)
                         .frame(minWidth: 460)
                 }
+                Divider()
+                BatchFooter(store: store)
             }
-            .background(Color(nsColor: .windowBackgroundColor))
         }
         .alert(item: Binding(
             get: { store.downloadAlert },
@@ -38,127 +32,57 @@ struct ContentView: View {
     }
 }
 
-private struct HeaderView: View {
-    let store: DownloaderStore
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("BatchClip")
-                    .font(.title2.weight(.semibold))
-                Text("Video saves as H.264 MP4. Audio saves as MP3 320 kbps.")
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-
-            VStack(alignment: .trailing, spacing: 6) {
-                Text(store.globalMessage)
-                    .font(.callout.weight(.medium))
-                Text(store.dependencySummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
 private struct EntryPanel: View {
     let store: DownloaderStore
     @Binding var linkKind: DownloadKind
+    @AppStorage("outputMode") private var outputMode: OutputMode = .compatible
+    @State private var includePlaylist = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Links")
-                    .font(.headline)
-
-                LinkListEditor(text: Binding(
-                    get: { store.pendingText },
-                    set: { store.pendingText = $0 }
-                ))
-                .font(.body.monospaced())
-                .scrollContentBackground(.hidden)
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Add Links")
+                .font(.headline)
+            Text("Paste one URL per line.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            LinkListEditor(text: Binding(get: { store.pendingText }, set: { store.pendingText = $0 }))
                 .padding(8)
                 .utilitySurface(cornerRadius: 8)
-                .frame(minHeight: 180)
+                .frame(minHeight: 120, maxHeight: .infinity)
                 .accessibilityLabel("Links to add")
-            }
+                .disabled(store.isRunning)
 
             Picker("Type", selection: $linkKind) {
                 ForEach(DownloadKind.allCases) { kind in
-                    Label(kind.rawValue, systemImage: kind.symbolName)
-                        .tag(kind)
+                    Label(kind.rawValue, systemImage: kind.symbolName).tag(kind)
                 }
             }
             .pickerStyle(.segmented)
 
-            Toggle(isOn: Binding(
-                get: { store.isRateLimitEnabled },
-                set: { store.isRateLimitEnabled = $0 }
-            )) {
-                Label("Enable rate-limiting", systemImage: "timer")
+            Picker("Output", selection: $outputMode) {
+                Text("Compatible").tag(OutputMode.compatible)
+                Text("Original / fastest").tag(OutputMode.original)
             }
-            .toggleStyle(.checkbox)
-            .disabled(store.isRunning || !store.canDisableRateLimit)
-
-            Text(store.rateLimitControlMessage)
+            Text(outputMode.detail(for: linkKind))
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Toggle("Download entire playlists", isOn: $includePlaylist)
+                .toggleStyle(.checkbox)
+                .help("Off downloads a single video. Turn on to include all entries from playlist links.")
+
+            HStack {
+                Button("Import…") { store.openTextFile() }
+                Spacer()
+                Button { store.addLinks(kind: linkKind, outputMode: outputMode, includePlaylist: includePlaylist) } label: {
+                    Label("Add to Batch", systemImage: "plus")
+                }
+                .disabled(store.pendingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .buttonStyle(.bordered)
+            .disabled(store.isRunning)
 
             if store.hasMissingDependencies {
                 DependencySetupView(store: store)
-            }
-
-            Button {
-                store.addLinks(kind: linkKind)
-            } label: {
-                Label("Add to Batch", systemImage: "plus")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(store.isRunning || store.pendingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Download Folder")
-                    .font(.headline)
-
-                HStack(spacing: 10) {
-                    Image(systemName: "folder")
-                        .foregroundStyle(.secondary)
-                    Text(store.selectedFolder.path)
-                        .lineLimit(2)
-                        .truncationMode(.middle)
-                    Spacer()
-                    Button("Browse") {
-                        store.chooseFolder()
-                    }
-                    .disabled(store.isRunning)
-                }
-                .padding(10)
-                .utilitySurface(cornerRadius: 8)
-            }
-
-            Spacer()
-
-            HStack(spacing: 10) {
-                Button {
-                    store.startBatch()
-                } label: {
-                    Label("Start Batch", systemImage: "arrow.down.circle.fill")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!store.canStart)
-
-                Button {
-                    store.cancelBatch()
-                } label: {
-                    Label("Stop Batch", systemImage: "stop.circle")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .disabled(!store.isRunning)
             }
         }
         .padding(20)
@@ -259,7 +183,8 @@ private struct QueuePanel: View {
                             item: item,
                             isStarting: store.isStartingNext(item),
                             canRemove: !store.isRunning,
-                            onRemove: { store.removeItem(id: item.id) }
+                            onRemove: { store.removeItem(id: item.id) },
+                            onRetry: { store.retryFailedItems(itemID: item.id) }
                         )
                             .padding(.vertical, 6)
                     }
@@ -301,6 +226,8 @@ private struct QueueRow: View {
     let isStarting: Bool
     let canRemove: Bool
     let onRemove: () -> Void
+    let onRetry: () -> Void
+    @State private var showingDetails = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
@@ -340,11 +267,13 @@ private struct QueueRow: View {
                             .lineLimit(2)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
+                        Text((URL(string: item.url)?.host ?? "") + (item.allowsPlaylist ? " · Playlist" : ""))
+                            .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
 
                 HStack(spacing: 8) {
-                    Text(item.kind.detail)
+                    Text(item.outputDetail)
                     Text(statusText)
                         .foregroundStyle(statusColor)
                 }
@@ -370,6 +299,29 @@ private struct QueueRow: View {
 
             Spacer()
 
+            if !item.log.isEmpty {
+                Button { showingDetails = true } label: {
+                    Image(systemName: "info.circle")
+                }
+                .buttonStyle(.plain)
+                .help("Show details and timings")
+                .accessibilityLabel("Show download details")
+            }
+
+            if item.status.isFinished, !item.downloadedFileURLs.isEmpty {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting(item.downloadedFileURLs)
+                } label: {
+                    Image(systemName: "folder")
+                        .font(.system(size: 15, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Show downloaded file in Finder")
+                .accessibilityLabel("Show downloaded file in Finder")
+            }
+
             Button(action: onRemove) {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 15, weight: .semibold))
@@ -380,10 +332,32 @@ private struct QueueRow: View {
             }
             .buttonStyle(.plain)
             .help("Remove from batch")
+            .accessibilityLabel("Remove from batch")
             .disabled(!canRemove)
             .opacity(canRemove ? 0.8 : 0.25)
 
             StatusIcon(status: item.status, isStarting: isStarting)
+        }
+        .contextMenu {
+            if item.status.isFailed {
+                Button("Retry Download", action: onRetry).disabled(!canRemove)
+            }
+            Button("Remove from Batch", action: onRemove).disabled(!canRemove)
+        }
+        .sheet(isPresented: $showingDetails) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(item.displayTitle).font(.headline).lineLimit(2)
+                if !item.timingSummary.isEmpty {
+                    Text(item.timingSummary).font(.caption).foregroundStyle(.secondary)
+                }
+                ScrollView {
+                    Text(item.log).font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                }
+                HStack { Spacer(); Button("Done") { showingDetails = false }.keyboardShortcut(.cancelAction) }
+            }
+            .padding(20)
+            .frame(width: 660, height: 420)
         }
     }
 

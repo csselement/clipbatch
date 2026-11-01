@@ -8,16 +8,31 @@ import UserNotifications
 @Observable
 final class DownloaderStore {
     static let moderateBatchWarningCount = 10
-    static let highBatchWarningCount = 25
-    static let minimumCooldownSeconds: UInt64 = 8
-    static let maximumCooldownSeconds: UInt64 = 18
 
     var pendingText = ""
     var items: [DownloadItem] = []
-    var selectedFolder: URL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSHomeDirectory())
+    var selectedFolder: URL {
+        didSet { preferences?.set(selectedFolder.path, forKey: "downloadFolder") }
+    }
     var isRunning = false
     var globalMessage = "Ready"
-    var isRateLimitEnabled = true
+    var pacing: DownloadPacing {
+        didSet { preferences?.set(pacing.rawValue, forKey: "downloadPacing") }
+    }
+    var isStopping = false
+    @ObservationIgnored private let preferences: UserDefaults?
+    @ObservationIgnored let tools: ToolPaths
+    @ObservationIgnored private let notificationsEnabled: Bool
+
+    init(preferences: UserDefaults? = .standard, tools: ToolPaths = .installed, notificationsEnabled: Bool = true) {
+        self.preferences = preferences
+        self.tools = tools
+        self.notificationsEnabled = notificationsEnabled
+        self.pacing = preferences?.string(forKey: "downloadPacing").flatMap(DownloadPacing.init(rawValue:)) ?? .cautious
+        self.selectedFolder = preferences?.string(forKey: "downloadFolder").map { URL(fileURLWithPath: $0) }
+            ?? FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory())
+    }
     var downloadAlert: DownloadAlert?
 
     private let runner = DownloadRunner()
@@ -25,15 +40,15 @@ final class DownloaderStore {
     private var isCancellationRequested = false
 
     private var ytDLPPath: String {
-        ToolLocator.executablePath(named: "yt-dlp")
+        tools.ytDLP
     }
 
     private var ffmpegPath: String {
-        ToolLocator.executablePath(named: "ffmpeg")
+        tools.ffmpeg
     }
 
     private var ffprobePath: String {
-        ToolLocator.executablePath(named: "ffprobe")
+        tools.ffprobe
     }
 
     private var brewPath: String {
@@ -41,7 +56,7 @@ final class DownloaderStore {
     }
 
     var unfinishedCount: Int {
-        items.filter { !$0.status.isFinished }.count
+        items.filter { $0.status == .queued }.count
     }
 
     var hasFailedItems: Bool {
@@ -53,15 +68,7 @@ final class DownloaderStore {
     }
 
     var canStart: Bool {
-        !isRunning && unfinishedCount > 0
-    }
-
-    var canDisableRateLimit: Bool {
-        unfinishedCount < Self.moderateBatchWarningCount
-    }
-
-    var rateLimitControlMessage: String {
-        canDisableRateLimit ? "Can be turned off for short batches." : "Required for batches of \(Self.moderateBatchWarningCount)+ queued links."
+        !isRunning && unfinishedCount > 0 && !hasMissingDependencies
     }
 
     var dependencySummary: String {
@@ -96,46 +103,37 @@ final class DownloaderStore {
     }
 
     var rateLimitWarning: String? {
-        guard isRateLimitEnabled else { return nil }
-        let remainingCount = unfinishedCount
-
-        if remainingCount >= Self.highBatchWarningCount {
-            return "High rate-limit risk: \(remainingCount) queued links. The app downloads sequentially with cooldowns, but large batches from the same site can still be throttled."
-        }
-
-        if remainingCount >= Self.moderateBatchWarningCount {
-            return "Rate-limit caution: \(remainingCount) queued links. Downloads are slowed automatically to reduce platform throttling risk."
-        }
-
-        return nil
+        let count = items.filter { $0.status == .queued || $0.status == .running }.count
+        let hasPlaylist = items.contains { $0.allowsPlaylist && !$0.status.isFinished }
+        guard count >= Self.moderateBatchWarningCount || hasPlaylist else { return nil }
+        return pacing == .standard
+            ? "Large batches and playlists can trigger site limits. Consider Cautious pacing."
+            : "Cautious pacing is enabled. Large batches and playlists can still trigger site limits."
     }
 
-    func addLinks(kind: DownloadKind) {
+    func addLinks(kind: DownloadKind, outputMode: OutputMode = .compatible, includePlaylist: Bool = false) {
         guard !isRunning else { return }
-
-        let links = pendingText
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
+        let links = pendingText.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         guard !links.isEmpty else { return }
-
-        let existing = Set(items.map(\.url))
-        let newItems = links
-            .filter { !existing.contains($0) }
-            .map { DownloadItem(url: $0, kind: kind) }
-
-        items.append(contentsOf: newItems)
-        if !canDisableRateLimit {
-            isRateLimitEnabled = true
+        var duplicates = 0
+        var rejected: [String] = []
+        var added = 0
+        for link in links {
+            guard let url = URL(string: link), ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
+                  let host = url.host, !host.isEmpty else {
+                rejected.append(link)
+                continue
+            }
+            if items.contains(where: { $0.url == link && $0.kind == kind && $0.outputMode == outputMode && $0.includePlaylist == includePlaylist }) {
+                duplicates += 1
+                continue
+            }
+            items.append(DownloadItem(url: link, kind: kind, outputMode: outputMode, includePlaylist: includePlaylist))
+            added += 1
         }
-        pendingText = ""
-
-        if let rateLimitWarning {
-            globalMessage = rateLimitWarning
-        } else {
-            globalMessage = newItems.isEmpty ? "No new links added" : "Added \(newItems.count) link\(newItems.count == 1 ? "" : "s")"
-        }
+        pendingText = rejected.joined(separator: "\n")
+        globalMessage = "Added \(added) · \(duplicates) duplicate(s) skipped" + (rejected.isEmpty ? "" : " · \(rejected.count) invalid link(s) left in editor")
     }
 
     func removeItems(at offsets: IndexSet) {
@@ -154,19 +152,20 @@ final class DownloaderStore {
     }
 
     func isStartingNext(_ item: DownloadItem) -> Bool {
-        guard isRunning else { return false }
+        guard isRunning && !isStopping else { return false }
         guard !items.contains(where: { if case .running = $0.status { return true } else { return false } }) else {
             return false
         }
 
-        let firstPending = items.first(where: { !$0.status.isFinished })
+        let firstPending = items.first(where: { $0.status == .queued })
         return firstPending?.id == item.id
     }
 
-    func retryFailedItems() {
+    func retryFailedItems(startImmediately: Bool = true, itemID: UUID? = nil) {
         guard !isRunning else { return }
+        let failedIDs = Set(items.filter { $0.status.isFailed && (itemID == nil || $0.id == itemID) }.map(\.id))
         for index in items.indices {
-            if case .failed = items[index].status {
+            if failedIDs.contains(items[index].id) {
                 items[index].status = .queued
                 items[index].log = ""
                 items[index].activityText = ""
@@ -174,6 +173,7 @@ final class DownloaderStore {
                 items[index].progressText = ""
             }
         }
+        if startImmediately { startBatch(itemIDs: failedIDs) }
     }
 
     func chooseFolder() {
@@ -221,8 +221,8 @@ final class DownloaderStore {
         }
     }
 
-    func startBatch() {
-        guard !isRunning else { return }
+    func startBatch(itemIDs: Set<UUID>? = nil) {
+        guard !isRunning, unfinishedCount > 0 else { return }
 
         guard FileManager.default.isExecutableFile(atPath: ytDLPPath) else {
             showMissingDependencyInstructions()
@@ -239,125 +239,134 @@ final class DownloaderStore {
             return
         }
 
+        let queuedIDs = items.filter { $0.status == .queued && (itemIDs?.contains($0.id) ?? true) }.map(\.id)
+        guard !queuedIDs.isEmpty else { return }
         isRunning = true
+        isStopping = false
+        downloadAlert = nil
         isCancellationRequested = false
-        activeBatchTask = Task { await runQueue() }
+        activeBatchTask = Task { await runQueue(queuedIDs: queuedIDs) }
     }
 
     func cancelBatch() {
-        guard isRunning else { return }
-
+        guard isRunning, !isStopping else { return }
         isCancellationRequested = true
-        isRunning = false
-        globalMessage = "Stopping batch..."
+        isStopping = true
+        globalMessage = "Stopping batch…"
         activeBatchTask?.cancel()
-
-        if let index = items.firstIndex(where: { $0.status == .running }) {
-            items[index].status = .failed("Cancelled")
-            items[index].progressPercent = nil
-            items[index].activityText = "Cancelled"
-        }
-
-        Task { await runner.cancel() }
+        // The task cancellation handler cancels its own active process group.
+        // Keep the queue locked until runQueue's cleanup has completed.
     }
 
-    private func runQueue() async {
+    private func runQueue(queuedIDs: [UUID]) async {
         defer {
             isRunning = false
+            isStopping = false
             activeBatchTask = nil
-            if isCancellationRequested && downloadAlert == nil {
-                globalMessage = "Batch cancelled"
-            }
+            if isCancellationRequested && downloadAlert == nil { globalMessage = "Batch cancelled" }
         }
-
-        let queueIndices = items.indices.filter { !items[$0].status.isFinished }
-        guard !queueIndices.isEmpty else {
-            globalMessage = "Nothing to download"
-            return
-        }
-
+        let folder = selectedFolder
+        let batchPacing = pacing
         var completedCount = 0
         var failedCount = 0
-
-        for (position, index) in queueIndices.enumerated() {
-            guard !Task.isCancelled, isRunning, !isCancellationRequested else { return }
+        for (position, id) in queuedIDs.enumerated() {
+            guard !Task.isCancelled, let index = items.firstIndex(where: { $0.id == id }) else { return }
             items[index].status = .running
-            items[index].progressPercent = 0
-            items[index].progressText = "0%"
-            items[index].activityText = "Starting"
             items[index].log = ""
-            globalMessage = "Downloading \(index + 1) of \(items.count)"
-
+            items[index].downloadedFileURLs = []
+            items[index].phaseDurations = [:]
+            items[index].phaseStartedAt = nil
+            items[index].setPhase(.preparing)
+            globalMessage = "Processing \(position + 1) of \(queuedIDs.count)"
+            let item = items[index]
             do {
-                let output = try await runYTDLP(for: index)
+                _ = try await runner.run(executablePath: ytDLPPath,
+                    arguments: DownloadCommand.arguments(for: item, folder: folder, pacing: batchPacing, tools: tools)) { [weak self] line in
+                    await self?.receiveOutput(line, for: id)
+                }
+                try Task.checkCancellation()
+                if item.kind == .video && item.outputMode == .compatible {
+                    let paths = items[index].downloadedFileURLs
+                    for path in paths {
+                        items[index].setPhase(.checking)
+                        let converted = try await MediaProcessor.compatibleVideo(path, tools: tools, runner: runner) { [weak self] percent in
+                            await self?.receiveConversionProgress(percent, for: id)
+                        }
+                        if let pathIndex = items[index].downloadedFileURLs.firstIndex(of: path) {
+                            items[index].downloadedFileURLs[pathIndex] = converted
+                        }
+                    }
+                }
+                if item.kind == .audio && item.outputMode == .original {
+                    let paths = items[index].downloadedFileURLs
+                    for path in paths {
+                        items[index].setPhase(.extractingAudio)
+                        let extracted = try await MediaProcessor.originalAudio(path, tools: tools, runner: runner)
+                        if let pathIndex = items[index].downloadedFileURLs.firstIndex(of: path) {
+                            items[index].downloadedFileURLs[pathIndex] = extracted
+                        }
+                    }
+                }
+                try Task.checkCancellation()
+                guard !items[index].downloadedFileURLs.isEmpty else {
+                    throw DownloadError.processFailed("No output file was reported. Open Details for the command output.")
+                }
                 items[index].status = .finished
+                items[index].setPhase(.complete)
                 items[index].progressPercent = 100
                 items[index].progressText = "100%"
-                items[index].activityText = "Complete"
-                items[index].log = output
                 completedCount += 1
             } catch {
-                guard !isCancellationRequested else { return }
+                items[index].finishTiming()
+                items[index].progressPercent = nil
+                items[index].progressText = ""
+                if Task.isCancelled || isCancellationRequested {
+                    items[index].status = .failed("Cancelled")
+                    items[index].activityText = "Cancelled"
+                    return
+                }
                 let failure = downloadFailureDetails(from: error)
                 failedCount += 1
                 items[index].status = .failed(failure.rowStatus)
-                items[index].progressPercent = nil
                 items[index].activityText = failure.title
                 items[index].log = items[index].log.appendingFailureMessage(failure.message)
-                globalMessage = failure.stopsBatch ? "Batch stopped" : "Download failed"
-
                 if failure.stopsBatch {
-                    isCancellationRequested = true
-                    isRunning = false
+                    globalMessage = "Batch stopped"
                     downloadAlert = DownloadAlert(title: failure.title, message: failure.message)
                     return
                 }
             }
-
-            let hasMoreItems = position < queueIndices.count - 1
-            if hasMoreItems && isRunning && !isCancellationRequested && isRateLimitEnabled {
-                await cooldownBeforeNextDownload()
-            }
         }
+        guard !Task.isCancelled else { return }
+        globalMessage = failedCount > 0 ? "Batch finished · \(completedCount) done · \(failedCount) failed" : "Batch complete"
+        if notificationsEnabled { notifyBatchComplete(downloadCount: completedCount, failedCount: failedCount) }
+    }
 
-        if !isCancellationRequested {
-            if failedCount > 0 {
-                globalMessage = "Batch finished with \(failedCount) failure\(failedCount == 1 ? "" : "s")"
-            } else {
-                globalMessage = "Batch complete"
+    private func receiveOutput(_ line: String, for id: UUID) {
+        guard let index = items.firstIndex(where: { $0.id == id }), items[index].status == .running else { return }
+        items[index].log += line
+        if items[index].log.count > 200_000 { items[index].log = String(items[index].log.suffix(100_000)) }
+        guard !isStopping, let event = DownloadOutputParser.event(for: line) else { return }
+        switch event {
+        case .title(let title): items[index].title = title
+        case .thumbnail(let thumbnail): items[index].thumbnailURL = thumbnail
+        case .file(let file):
+            if FileManager.default.fileExists(atPath: file.path), !items[index].downloadedFileURLs.contains(file) {
+                items[index].downloadedFileURLs.append(file)
             }
-            notifyBatchComplete(downloadCount: completedCount, failedCount: failedCount)
+        case .phase(let phase): items[index].setPhase(phase)
+        case .progress(let percent, let detail):
+            items[index].setPhase(.downloading)
+            items[index].progressPercent = percent
+            items[index].progressText = detail
         }
     }
 
-    private func runYTDLP(for index: Int) async throws -> String {
-        try await runner.run(
-            executablePath: ytDLPPath,
-            arguments: arguments(for: items[index]),
-            onOutput: { [weak self] output in
-                guard let self else { return }
-                Task { @MainActor in
-                    self.items[index].log += output
-                    self.updateActivity(from: output, for: index)
-                    self.updateProgress(from: output, for: index)
-                    self.updateMetadata(from: output, for: index)
-                }
-            }
-        )
-    }
-
-    private func cooldownBeforeNextDownload() async {
-        let seconds = UInt64.random(in: Self.minimumCooldownSeconds...Self.maximumCooldownSeconds)
-
-        do {
-            for remainingSeconds in stride(from: seconds, through: 1, by: -1) {
-                guard !Task.isCancelled, isRunning, !isCancellationRequested else { return }
-                globalMessage = "Cooling down for \(remainingSeconds)s to reduce rate-limit risk"
-                try await Task.sleep(for: .seconds(1))
-            }
-        } catch {
-            globalMessage = "Cooldown interrupted"
-        }
+    private func receiveConversionProgress(_ percent: Double?, for id: UUID) {
+        guard !isStopping, let index = items.firstIndex(where: { $0.id == id }), items[index].status == .running else { return }
+        items[index].setPhase(.converting)
+        items[index].progressPercent = percent
+        items[index].progressText = percent.map { "\(Int($0))%" } ?? ""
     }
 
     private func notifyBatchComplete(downloadCount: Int, failedCount: Int) {
@@ -388,76 +397,6 @@ final class DownloaderStore {
     }
 }
 
-actor DownloadRunner {
-    private var activeProcess: Process?
-
-    func cancel() {
-        activeProcess?.terminate()
-        activeProcess = nil
-    }
-
-    func run(
-        executablePath: String,
-        arguments: [String],
-        onOutput: @escaping @Sendable (String) -> Void = { _ in }
-    ) async throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executablePath)
-        process.arguments = arguments
-        process.environment = [
-            "PATH": ToolLocator.processSearchPath
-        ]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        activeProcess = process
-
-        let outputCollector = OutputCollector()
-        let outputHandle = pipe.fileHandleForReading
-        outputHandle.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
-            Task { await outputCollector.append(chunk) }
-            onOutput(chunk)
-        }
-
-        do {
-            try process.run()
-        } catch {
-            outputHandle.readabilityHandler = nil
-            activeProcess = nil
-            throw error
-        }
-
-        process.waitUntilExit()
-        outputHandle.readabilityHandler = nil
-        activeProcess = nil
-
-        let remainingData = outputHandle.readDataToEndOfFile()
-        let remaining = String(data: remainingData, encoding: .utf8) ?? ""
-        await outputCollector.append(remaining)
-        if !remaining.isEmpty {
-            onOutput(remaining)
-        }
-        let outputText = await outputCollector.value
-
-        if process.terminationStatus != 0 {
-            throw DownloadError.processFailed(outputText.trimmedFallback("yt-dlp exited with status \(process.terminationStatus)"))
-        }
-
-        return outputText.trimmedFallback("Download completed")
-    }
-}
-
-actor OutputCollector {
-    private(set) var value = ""
-
-    func append(_ chunk: String) {
-        value += chunk
-    }
-}
-
 struct ToolLocator {
     static let defaultSearchDirectories = [
         "/opt/homebrew/bin",
@@ -469,7 +408,7 @@ struct ToolLocator {
     ]
 
     static var processSearchPath: String {
-        defaultSearchDirectories.joined(separator: ":")
+        orderedUnique(defaultSearchDirectories + (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)).joined(separator: ":")
     }
 
     static func executablePath(
@@ -526,191 +465,6 @@ struct DependencyInstaller {
 }
 
 private extension DownloaderStore {
-    func arguments(for item: DownloadItem) -> [String] {
-        let outputTemplate = selectedFolder
-            .appendingPathComponent("%(title).180B [%(id)s].%(ext)s")
-            .path
-
-        var args = [
-            "--ffmpeg-location", ffmpegPath,
-            "--print", "title:%(title)s",
-            "--print", "thumbnail:%(thumbnail)s",
-            "--no-simulate",
-            "--newline",
-            "--progress",
-            "--restrict-filenames",
-            "-o", outputTemplate
-        ]
-
-        if item.allowsPlaylist {
-            args.append("--yes-playlist")
-        } else {
-            args.append("--no-playlist")
-        }
-
-        if isRateLimitEnabled {
-            args += [
-                "--sleep-requests", "1.5",
-                "--sleep-interval", "8",
-                "--max-sleep-interval", "18",
-                "--retry-sleep", "http:exp=5:60",
-                "--retry-sleep", "fragment:exp=2:20",
-            ]
-        }
-
-        switch item.kind {
-        case .video:
-            let transcodeCommand = """
-            after_move:/bin/sh -c 'file="$1"; codec="$("\(ffprobePath)" -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1:nk=1 "$file")"; if [ "$codec" = "h264" ]; then exit 0; fi; tmp="${file%.*}.h264.mp4"; "\(ffmpegPath)" -y -i "$file" -map 0:v:0 -map 0:a? -c:v libx264 -preset medium -crf 18 -c:a aac -b:a 192k -movflags +faststart "$tmp" && mv "$tmp" "$file"' sh {}
-            """.trimmingCharacters(in: .whitespacesAndNewlines)
-
-            args += [
-                "-f", "bv*[vcodec^=avc1][ext=mp4]+ba[ext=m4a]/b[vcodec^=avc1][ext=mp4]/bv*+ba/b",
-                "-S", "vcodec:h264,ext:mp4:m4a",
-                "--merge-output-format", "mp4",
-                "--exec", transcodeCommand
-            ]
-        case .audio:
-            args += [
-                "-x",
-                "--audio-format", "mp3",
-                "--audio-quality", "320K"
-            ]
-        }
-
-        args.append(item.url)
-        return args
-    }
-
-    func updateProgress(from output: String, for index: Int) {
-        guard case .running = items[index].status else { return }
-
-        let components = output
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { $0.hasSuffix("%") }
-
-        for part in components.reversed() {
-            let candidate = String(part.dropLast())
-            let normalized = candidate.replacingOccurrences(of: ",", with: ".")
-            if let progress = Double(normalized), (0...100).contains(progress) {
-                items[index].progressPercent = progress
-                items[index].progressText = "\(Int(progress.rounded()))%"
-                return
-            }
-        }
-    }
-
-    func updateActivity(from output: String, for index: Int) {
-        guard case .running = items[index].status else { return }
-
-        for line in output.components(separatedBy: .newlines).reversed() {
-            let activity = activityDescription(for: line)
-            if !activity.isEmpty {
-                items[index].activityText = activity
-                return
-            }
-        }
-    }
-
-    func activityDescription(for line: String) -> String {
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lowercased = trimmed.lowercased()
-
-        if trimmed.hasPrefix("title:") || trimmed.hasPrefix("thumbnail:") {
-            return "Reading metadata"
-        }
-
-        if lowercased.contains("extracting url") ||
-            lowercased.contains("downloading webpage") ||
-            lowercased.contains("downloading api json") ||
-            lowercased.contains("downloading player") ||
-            lowercased.contains("downloading ios player api json") ||
-            lowercased.contains("downloading android player api json") {
-            return "Grabbing metadata"
-        }
-
-        if lowercased.hasPrefix("[info]") {
-            return "Selecting format"
-        }
-
-        if lowercased.hasPrefix("[download]") {
-            if lowercased.contains("destination:") {
-                return "Starting download"
-            }
-
-            if lowercased.contains("has already been downloaded") ||
-                lowercased.contains("100%") {
-                return "Download complete"
-            }
-
-            return "Downloading"
-        }
-
-        if lowercased.hasPrefix("[merger]") {
-            return "Merging audio and video"
-        }
-
-        if lowercased.hasPrefix("[ffmpeg]") ||
-            lowercased.hasPrefix("[videoconvertor]") {
-            return "Converting video"
-        }
-
-        if lowercased.hasPrefix("[extractaudio]") {
-            return "Extracting audio"
-        }
-
-        if lowercased.hasPrefix("[movefiles]") {
-            return "Moving file"
-        }
-
-        if lowercased.hasPrefix("[exec]") {
-            return "Checking final file"
-        }
-
-        if lowercased.contains("deleting original file") {
-            return "Cleaning up"
-        }
-
-        return ""
-    }
-
-    func updateMetadata(from output: String, for index: Int) {
-        applyMetadata(parseMetadata(from: output), to: index)
-    }
-
-    func applyMetadata(_ metadata: (title: String?, thumbnailURL: String?), to index: Int) {
-        if let title = metadata.title, !title.isEmpty {
-            items[index].title = title
-        }
-
-        if let thumbnailURL = metadata.thumbnailURL, !thumbnailURL.isEmpty {
-            items[index].thumbnailURL = thumbnailURL
-        }
-    }
-
-    func parseMetadata(from output: String) -> (title: String?, thumbnailURL: String?) {
-        var title: String?
-        var thumbnailURL: String?
-        let lines = output.components(separatedBy: .newlines)
-
-        for line in lines {
-            if line.hasPrefix("title:") {
-                let value = String(line.dropFirst("title:".count))
-                if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    title = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-            } else if line.hasPrefix("thumbnail:") {
-                let value = String(line.dropFirst("thumbnail:".count))
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                if !value.isEmpty {
-                    thumbnailURL = value
-                }
-            }
-        }
-
-        return (title, thumbnailURL)
-    }
-
     func downloadFailureDetails(from error: Error) -> DownloadFailureDetails {
         DownloadFailureClassifier.details(from: error.localizedDescription)
     }
@@ -728,7 +482,7 @@ struct DownloadFailureClassifier {
             normalized.contains("use --cookies") {
             return DownloadFailureDetails(
                 title: "YouTube Bot Check",
-                message: "YouTube is asking to confirm this is not a bot. The batch has been stopped to avoid additional automated requests. Wait before retrying, reduce the batch size, and keep rate-limiting enabled.",
+                message: "YouTube is asking to confirm this is not a bot. The batch has been stopped to avoid additional automated requests. Wait before retrying, reduce the batch size, and use Cautious pacing.",
                 rowStatus: "Bot check",
                 stopsBatch: true
             )
@@ -741,7 +495,7 @@ struct DownloadFailureClassifier {
             normalized.contains("throttled") {
             return DownloadFailureDetails(
                 title: "Rate Limit Detected",
-                message: "The site appears to be rate-limiting requests. The batch has been stopped to avoid additional automated requests. Wait before retrying, reduce the batch size, and keep rate-limiting enabled.",
+                message: "The site appears to be rate-limiting requests. The batch has been stopped to avoid additional automated requests. Wait before retrying, reduce the batch size, and use Cautious pacing.",
                 rowStatus: "Rate limited",
                 stopsBatch: true
             )
