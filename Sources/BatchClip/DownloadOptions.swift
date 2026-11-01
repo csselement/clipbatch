@@ -42,11 +42,9 @@ struct ToolPaths: Sendable {
     var ytDLP: String
     var ffmpeg: String
     var ffprobe: String
-    static var installed: ToolPaths {
-        ToolPaths(ytDLP: ToolLocator.executablePath(named: "yt-dlp"),
-                  ffmpeg: ToolLocator.executablePath(named: "ffmpeg"),
-                  ffprobe: ToolLocator.executablePath(named: "ffprobe"))
-    }
+    var deno: String? = nil
+    static var installed: ToolPaths { ToolEnvironment.production.resolve() }
+
 }
 
 struct DownloadCommand {
@@ -64,6 +62,7 @@ struct DownloadCommand {
             "--restrict-filenames", "-o", folder.appendingPathComponent("%(title).180B [%(id)s]\(suffix).%(ext)s").path,
             item.allowsPlaylist ? "--yes-playlist" : "--no-playlist"
         ] + pacing.arguments
+        if let deno = tools.deno { args += ["--js-runtimes", "deno:\(deno)"] }
         switch (item.kind, item.outputMode) {
         case (.video, .compatible):
             args += ["-f", "bv*[vcodec^=avc1][ext=mp4]+ba[ext=m4a]/b[vcodec^=avc1][ext=mp4]/bv*+ba/b", "-S", "vcodec:h264,ext:mp4:m4a", "--merge-output-format", "mp4"]

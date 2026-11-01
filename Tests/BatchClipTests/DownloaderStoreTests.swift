@@ -5,6 +5,19 @@ import Testing
 
 @MainActor
 struct DownloaderStoreTests {
+    @Test func missingDenoRequiresSetupOnlyForYouTube() {
+        let tools = ToolPaths(ytDLP: "/usr/bin/true", ffmpeg: "/usr/bin/true", ffprobe: "/usr/bin/true")
+        let store = DownloaderStore(preferences: nil, tools: tools, notificationsEnabled: false)
+        store.items = [DownloadItem(url: "https://example.com/video", kind: .video)]
+        #expect(store.canStart)
+        store.items = [DownloadItem(url: "https://www.youtube.com/watch?v=video", kind: .video)]
+        #expect(!store.canStart && store.needsYouTubeSetup)
+        store.startBatch()
+        #expect(store.showingToolSetup && !store.isRunning)
+        store.items = [DownloadItem(url: "https://youtube.com.example.com/video", kind: .video)]
+        #expect(store.canStart)
+    }
+
     @Test func addLinksIsIgnoredWhileBatchIsRunning() {
         let store = DownloaderStore(preferences: nil, notificationsEnabled: false)
         store.isRunning = true

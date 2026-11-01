@@ -2,7 +2,6 @@ import SwiftUI
 
 struct BatchFooter: View {
     let store: DownloaderStore
-    @State private var showingTools = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -20,17 +19,11 @@ struct BatchFooter: View {
                 .frame(width: 180)
                 .disabled(store.isRunning)
                 .help(store.pacing.detail)
-                Button { showingTools.toggle() } label: { Image(systemName: "wrench.and.screwdriver") }
-                    .help("Tool status")
-                    .accessibilityLabel("Tool status")
-                    .popover(isPresented: $showingTools) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Download Tools").font(.headline)
-                            Text(store.dependencySummary)
-                            Text("yt-dlp: \(store.tools.ytDLP)\nffmpeg: \(store.tools.ffmpeg)\nffprobe: \(store.tools.ffprobe)")
-                                .font(.caption.monospaced()).textSelection(.enabled)
-                        }.padding(20)
-                    }
+                Button { store.showingToolSetup = true } label: { Image(systemName: "wrench.and.screwdriver") }
+                    .help("Manage download tools")
+                    .accessibilityLabel("Manage download tools")
+                    .disabled(store.isRunning)
+
             }
             HStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 3) {
@@ -47,6 +40,12 @@ struct BatchFooter: View {
                             .frame(minWidth: 120)
                     }
                     .disabled(store.isStopping)
+                } else if store.hasMissingDependencies || store.needsYouTubeSetup {
+                    Button { store.showingToolSetup = true } label: {
+                        Label("Set Up Tools…", systemImage: "arrow.down.circle")
+                            .frame(minWidth: 120)
+                    }
+                    .buttonStyle(.borderedProminent)
                 } else {
                     Button { store.startBatch() } label: {
                         Label("Start Batch", systemImage: "arrow.down.circle.fill")

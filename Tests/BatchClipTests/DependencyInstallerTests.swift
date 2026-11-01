@@ -3,13 +3,13 @@ import Testing
 
 struct DependencyInstallerTests {
     @Test func commandsUseOnlyBrewInstallWhenHomebrewExists() {
-        #expect(DependencyInstaller.commands(hasHomebrew: true) == "brew install yt-dlp ffmpeg")
+        #expect(DependencyInstaller.commands(hasHomebrew: true) == "brew install yt-dlp ffmpeg deno")
     }
 
     @Test func commandsIncludeHomebrewInstallWhenHomebrewIsMissing() {
         let commands = DependencyInstaller.commands(hasHomebrew: false)
 
         #expect(commands.contains("https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"))
-        #expect(commands.contains("brew install yt-dlp ffmpeg"))
+        #expect(commands.contains("brew install yt-dlp ffmpeg deno"))
     }
 }

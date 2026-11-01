@@ -21,12 +21,14 @@ final class DownloaderStore {
     }
     var isStopping = false
     @ObservationIgnored private let preferences: UserDefaults?
-    @ObservationIgnored let tools: ToolPaths
+    let dependencies: ToolManager
+    var tools: ToolPaths { dependencies.paths }
+    var showingToolSetup = false
     @ObservationIgnored private let notificationsEnabled: Bool
 
-    init(preferences: UserDefaults? = .standard, tools: ToolPaths = .installed, notificationsEnabled: Bool = true) {
+    init(preferences: UserDefaults? = .standard, tools: ToolPaths? = nil, notificationsEnabled: Bool = true) {
         self.preferences = preferences
-        self.tools = tools
+        self.dependencies = ToolManager(paths: tools)
         self.notificationsEnabled = notificationsEnabled
         self.pacing = preferences?.string(forKey: "downloadPacing").flatMap(DownloadPacing.init(rawValue:)) ?? .cautious
         self.selectedFolder = preferences?.string(forKey: "downloadFolder").map { URL(fileURLWithPath: $0) }
@@ -68,32 +70,26 @@ final class DownloaderStore {
     }
 
     var canStart: Bool {
-        !isRunning && unfinishedCount > 0 && !hasMissingDependencies
+        !isRunning && !dependencies.isBusy && unfinishedCount > 0 && !hasMissingDependencies && !needsYouTubeSetup
     }
 
-    var dependencySummary: String {
-        let ytdlp = FileManager.default.isExecutableFile(atPath: ytDLPPath) ? "yt-dlp ready" : "yt-dlp missing"
-        let ffmpeg = FileManager.default.isExecutableFile(atPath: ffmpegPath) ? "ffmpeg ready" : "ffmpeg missing"
-        let ffprobe = FileManager.default.isExecutableFile(atPath: ffprobePath) ? "ffprobe ready" : "ffprobe missing"
-        return "\(ytdlp) · \(ffmpeg) · \(ffprobe)"
-    }
+    var dependencySummary: String { dependencies.summary }
 
     var missingDependencyNames: [String] {
-        [
-            ("yt-dlp", ytDLPPath),
-            ("ffmpeg", ffmpegPath),
-            ("ffprobe", ffprobePath)
-        ].compactMap { name, path in
-            FileManager.default.isExecutableFile(atPath: path) ? nil : name
+        ToolKind.allCases.filter { $0 != .deno && dependencies.missing.contains($0) }.map(\.rawValue)
+    }
+
+    var hasMissingDependencies: Bool { dependencies.hasMissingCoreTools }
+
+    var needsYouTubeSetup: Bool {
+        dependencies.missing.contains(.deno) && items.contains { item in
+            guard item.status == .queued, let host = URL(string: item.url)?.host?.lowercased() else { return false }
+            return host == "youtu.be" || host == "youtube.com" || host.hasSuffix(".youtube.com")
         }
     }
 
-    var hasMissingDependencies: Bool {
-        !missingDependencyNames.isEmpty
-    }
-
     var dependencySetupMessage: String {
-        "Missing: \(missingDependencyNames.joined(separator: ", ")). Open Terminal and run:"
+        hasMissingDependencies ? "Install download tools to get started." : "Add Deno for full YouTube support."
     }
 
     var dependencySetupCommands: String {
@@ -224,17 +220,9 @@ final class DownloaderStore {
     func startBatch(itemIDs: Set<UUID>? = nil) {
         guard !isRunning, unfinishedCount > 0 else { return }
 
-        guard FileManager.default.isExecutableFile(atPath: ytDLPPath) else {
-            showMissingDependencyInstructions()
-            return
-        }
-
-        guard FileManager.default.isExecutableFile(atPath: ffmpegPath) else {
-            showMissingDependencyInstructions()
-            return
-        }
-
-        guard FileManager.default.isExecutableFile(atPath: ffprobePath) else {
+        guard !dependencies.isBusy else { return }
+        guard !hasMissingDependencies, !needsYouTubeSetup,
+              [ytDLPPath, ffmpegPath, ffprobePath].allSatisfy({ FileManager.default.isExecutableFile(atPath: $0) }) else {
             showMissingDependencyInstructions()
             return
         }
@@ -390,10 +378,7 @@ final class DownloaderStore {
 
     private func showMissingDependencyInstructions() {
         globalMessage = "Install required tools"
-        downloadAlert = DownloadAlert(
-            title: "Install Required Tools",
-            message: "\(dependencySetupMessage)\n\n\(dependencySetupCommands)\n\nffprobe is included with ffmpeg. Follow any Homebrew next-step PATH instructions, then reopen BatchClip."
-        )
+        showingToolSetup = true
     }
 }
 
@@ -450,7 +435,7 @@ struct ToolLocator {
 
 struct DependencyInstaller {
     static let installHomebrewCommand = #"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#
-    static let installToolsCommand = "brew install yt-dlp ffmpeg"
+    static let installToolsCommand = "brew install yt-dlp ffmpeg deno"
 
     static func commands(hasHomebrew: Bool) -> String {
         if hasHomebrew {

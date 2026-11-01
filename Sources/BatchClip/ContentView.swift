@@ -19,6 +19,13 @@ struct ContentView: View {
                 BatchFooter(store: store)
             }
         }
+        .task {
+            await store.dependencies.refresh()
+            if store.hasMissingDependencies { store.showingToolSetup = true }
+        }
+        .sheet(isPresented: Binding(get: { store.showingToolSetup }, set: { store.showingToolSetup = $0 })) {
+            ToolSetupView(store: store)
+        }
         .alert(item: Binding(
             get: { store.downloadAlert },
             set: { store.downloadAlert = $0 }
@@ -81,53 +88,21 @@ private struct EntryPanel: View {
             .buttonStyle(.bordered)
             .disabled(store.isRunning)
 
-            if store.hasMissingDependencies {
-                DependencySetupView(store: store)
+            if store.dependencies.needsSetup {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "wrench.and.screwdriver").foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(store.dependencySetupMessage).font(.caption)
+                        Button("Set Up Tools…") { store.showingToolSetup = true }
+                            .disabled(store.isRunning)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
             }
         }
         .padding(20)
-    }
-}
-
-private struct DependencySetupView: View {
-    let store: DownloaderStore
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "wrench.and.screwdriver")
-                    .foregroundStyle(.orange)
-                    .frame(width: 18)
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(store.dependencySetupMessage)
-                        .font(.caption)
-                        .foregroundStyle(.primary)
-
-                    ScrollView(.horizontal, showsIndicators: true) {
-                        Text(store.dependencySetupCommands)
-                            .font(.caption.monospaced())
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-                }
-            }
-
-            Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(store.dependencySetupCommands, forType: .string)
-                store.globalMessage = "Setup commands copied"
-            } label: {
-                Label("Copy Setup Commands", systemImage: "doc.on.doc")
-                    .frame(maxWidth: .infinity)
-            }
-        }
-        .padding(12)
-        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-        .overlay {
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.orange.opacity(0.35), lineWidth: 1)
-        }
     }
 }
 

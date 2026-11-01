@@ -18,6 +18,15 @@ struct DownloadOptionsTests {
         #expect(Array(standard.suffix(2)) == ["--", item.url])
     }
 
+    @Test func passesManagedDenoPathAsOneArgument() {
+        var configured = tools
+        configured.deno = "/Users/example/Application Support/BatchClip/Tools/deno"
+        let item = DownloadItem(url: "https://youtube.com/watch?v=video", kind: .video)
+        let args = DownloadCommand.arguments(for: item, folder: URL(fileURLWithPath: "/tmp"), pacing: .standard, tools: configured)
+        let index = args.firstIndex(of: "--js-runtimes")!
+        #expect(args[index + 1] == "deno:/Users/example/Application Support/BatchClip/Tools/deno")
+    }
+
     @Test func originalVideoDoesNotRequestConversionOrForceMP4() {
         let item = DownloadItem(url: "https://example.com/video", kind: .video, outputMode: .original)
         let args = DownloadCommand.arguments(for: item, folder: URL(fileURLWithPath: "/tmp"), pacing: .standard, tools: tools)

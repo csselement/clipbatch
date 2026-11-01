@@ -43,32 +43,37 @@ Large queues and playlist jobs show a reminder to consider Cautious pacing. Paci
 - **Retry Failed** starts failed/cancelled jobs again, leaving unrelated queued jobs for Start Batch. A failed row's contextual menu can retry just that job.
 - Completed rows retain **Show downloaded file in Finder**.
 - **Clear Done** removes completed entries from the queue, not their files.
-- Tool status is available from the footer's wrench button. Missing tools show installation instructions.
+- Tool status and setup are available from the footer's wrench button. Missing tools can be installed directly in the app.
 
-## Requirements
+## Requirements and First Launch
 
 - macOS 14 or newer
-- Swift toolchain for building from source
-- `yt-dlp`
-- `ffmpeg`
-- `ffprobe`
+- Internet access for setup and downloads
+- Swift toolchain only when building from source
 
-BatchClip checks common Homebrew and system executable locations, including `/opt/homebrew/bin`, `/usr/local/bin`, and the process `PATH`. If a required tool is missing, the app shows the shortest Terminal setup commands for that Mac and offers a copy button.
+When download tools are missing, BatchClip opens a setup screen. Click **Install Download Tools** to download and verify private copies of `yt-dlp`, `ffmpeg`, `ffprobe`, and Deno. No Terminal, Homebrew, Python installation, or administrator password is needed. Progress, cancellation, and retry are available; installed tools become usable immediately without restarting the app.
 
-If Homebrew is already installed, run:
+Deno provides the JavaScript runtime needed for full YouTube support. Missing Deno blocks queued YouTube jobs while other supported sites remain usable. A broken or outdated executable is offered for repair. BatchClip checks versions and the H.264/MP3 encoders it uses.
+
+Working tools in Homebrew/system locations and the process `PATH` are reused. App-managed copies live in `~/Library/Application Support/BatchClip/Tools` and take precedence when present. FFmpeg and ffprobe are installed as a matching pair. Setup does not modify system tools, run package-manager scripts, or change Gatekeeper settings.
+
+Downloads use HTTPS, pinned releases, and SHA-256 verification before execution. All requested tools are validated before an atomic activation; failed or cancelled setup leaves previously installed tools active. The downloads come from:
+
+- [yt-dlp's official standalone macOS release](https://github.com/yt-dlp/yt-dlp/releases/tag/2026.10.26), including Python and the JavaScript challenge components. BatchClip uses the folder-based package, extracted once during setup, to avoid the single-file package's repeated runtime-extraction delay.
+- [Martin Riedl's FFmpeg macOS builds](https://ffmpeg.martin-riedl.de/), a third-party distributor providing native Apple Silicon and Intel builds (9.0.2).
+- [Deno's official macOS release](https://github.com/denoland/deno/releases/tag/v2.9.8).
+
+The pinned versions and hashes are maintained in `ToolDownloadCatalog.swift`. Setup installs missing or broken tools; it does not silently update working tools. Future upstream changes may require a BatchClip update or updating tools with Homebrew.
+
+### Optional Homebrew setup
+
+For users who prefer managing dependencies themselves:
 
 ```bash
-brew install yt-dlp ffmpeg
+brew install yt-dlp ffmpeg deno
 ```
 
-If Homebrew is not installed, run the official installer first:
-
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-brew install yt-dlp ffmpeg
-```
-
-`ffprobe` is included with `ffmpeg`. If Homebrew prints PATH setup instructions after installation, follow those before reopening BatchClip.
+`ffprobe` is included with `ffmpeg`. If needed, install Homebrew from [brew.sh](https://brew.sh/) first. Use **Check Again** in BatchClip's tools screen after installation; no app restart is needed. The setup screen retains copyable Homebrew commands as a fallback.
 
 ## Build And Run
 
@@ -95,7 +100,7 @@ dist/BatchClip.app
 To create a release zip locally, pass the version without a leading `v`:
 
 ```bash
-./script/package_release.sh 0.2.0
+./script/package_release.sh 0.2.1
 ```
 
 ## Tests
@@ -113,6 +118,15 @@ python3 script/test_local_pipeline.py
 ```
 
 The latter requires Python 3 plus the app's tools. It creates and cleans up its own fixtures and HTTP server. Without that harness, the two HTTP pipeline tests are skipped. Media conversion tests also require ffmpeg.
+
+Fresh dependency installation can be exercised without touching system tools (use a new, empty directory):
+
+```bash
+BATCHCLIP_TEST_MANAGED_INSTALL=/tmp/batchclip-fresh-tools swift test --filter realManagedInstallation
+BATCHCLIP_TEST_TOOLS_DIRECTORY=/tmp/batchclip-fresh-tools python3 script/test_local_pipeline.py
+```
+
+The first command makes real upstream downloads. The second uses those tools for the app pipeline. `BATCHCLIP_TEST_TOOLS_DIRECTORY` is a debug-only override that disables system-tool detection; release builds ignore it. Installer unit tests cover integrity failures, cancellation, offline errors, partial-install rollback, receipt validation, and detecting externally installed tools without restarting.
 
 ## Limitations
 
